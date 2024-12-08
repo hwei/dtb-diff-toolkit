@@ -1,6 +1,6 @@
 import yaml
 import sys
-from typing import TypeAlias, Callable
+from typing import TypeAlias, Callable, NamedTuple, Generator
 from phandle_property_defines import PhandlePropertyDefines, SchemaDefine
 
 class phandle:
@@ -17,6 +17,10 @@ def construct_hex(loader, node):
 
 yaml.add_constructor('!u64', construct_hex)
 yaml.add_constructor('!u8', construct_hex)
+
+class PhandleError(NamedTuple):
+    message: str
+    in_disabled_node: bool
 
 
 def verify_phandle_cells_args(prop_name: str, node: dict, phandle_to_path_node: dict[int, tuple[str, dict]], provider_cell_name: str, provider_cell_optional = ''):
@@ -163,9 +167,9 @@ def verify_dts_phandle_type(input_dts_yaml_path: str):
             if isinstance(value, dict):
                 collect_phandle_to_path_node(f'{path}/{key}', value)
 
-    def verify_prop_type(node_path: str, prop_node: dict[str, any], parent_prop_path: str):
-        if 'status' in prop_node and prop_node['status'][0] == 'disabled':
-            return
+    def verify_prop_type(node_path: str, prop_node: dict[str, any], parent_prop_path: str, in_disabled_node: bool) -> Generator[PhandleError, None, None]:
+        if not in_disabled_node:
+            in_disabled_node = 'status' in prop_node and prop_node['status'][0] == 'disabled'
 
         for key, value in prop_node.items():
             if key == 'compatible':
@@ -177,11 +181,11 @@ def verify_dts_phandle_type(input_dts_yaml_path: str):
                 next_node_path = f'{node_path}/{key}'
                 if 'compatible' in value:
                     # 一个新的 node
-                    for e in verify_prop_type(next_node_path, value, ''):
+                    for e in verify_prop_type(next_node_path, value, '', in_disabled_node):
                         yield e
                 else:
                     # 当前 node 的嵌套属性
-                    for e in verify_prop_type(node_path, value, prop_path):
+                    for e in verify_prop_type(node_path, value, prop_path, in_disabled_node):
                         yield e
             else:
                 verify_func = get_verify_func(key)
@@ -194,12 +198,14 @@ def verify_dts_phandle_type(input_dts_yaml_path: str):
                     except ValueError as e1:
                         e = e1
                     if e:
-                        yield ValueError(f'Error in {node_path}:{prop_path}: {e}')
+                        yield PhandleError(
+                            f'Error in {node_path}:{prop_path}: {e}', in_disabled_node)
                 else:
                     # 未知的 Phandle 属性，记录下来
                     prop_type = transform_prop_value_to_type(value)
                     if prop_type:
-                        yield ValueError(f'Unknown phandle property {node_path}:{prop_path}: {prop_type}')
+                        yield PhandleError(
+                            f'Unknown phandle property {node_path}:{prop_path}: {prop_type}', in_disabled_node)
 
     
     with open(input_dts_yaml_path, 'r') as file:
@@ -207,9 +213,13 @@ def verify_dts_phandle_type(input_dts_yaml_path: str):
     root_node = data[0]
     collect_phandle_to_path_node('', root_node)
     any_error = False
-    for e in verify_prop_type('', root_node, ''):
-        print(e)
-        any_error = True
+    for e in verify_prop_type('', root_node, '', False):
+        if e.in_disabled_node:
+            print(e.message, '(in a disabled node)')
+        else:
+            print(e.message)
+            any_error = True
+        
     if any_error:
         sys.exit(1)
 
